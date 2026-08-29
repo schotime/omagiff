@@ -1,0 +1,89 @@
+#!/bin/bash
+# Open giff in its own window (app-id TUI.giff), shaped to suit the layout of
+# the workspace it lands on.
+#
+#   scrolling  -> tiled, resized to a full-width column
+#   otherwise  -> a centred float at 90% of the monitor
+#
+# The whole rule is created here rather than in hyprland.lua so there is one
+# source of truth per launch, instead of a static rule that the scrolling case
+# would then have to fight.
+
+for required in omarchy-launch-tui omagiff-run; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "omagiff: $required not found on PATH" >&2
+    exit 1
+  fi
+done
+
+# Shape can be forced, for when the workspace layout is not what you want this
+# particular window to follow. Consumed here so the rest is passed to giff.
+mode=auto
+while :; do
+  case "${1:-}" in
+    --float) mode=float; shift ;;
+    --tile | --wide) mode=tile; shift ;;
+    --auto) mode=auto; shift ;;
+    *) break ;;
+  esac
+done
+
+layout=""
+if [[ $mode == auto ]]; then
+  command -v jq >/dev/null 2>&1 &&
+    layout=$(hyprctl activeworkspace -j 2>/dev/null | jq -r '.tiledLayout // empty' 2>/dev/null)
+else
+  layout=$([[ $mode == tile ]] && echo scrolling || echo forced-float)
+fi
+
+apply_rule() {
+  # Replacing the previous launch's rule keeps a float rule from outliving the
+  # workspace it was made for. A Hyprland without the Lua eval API just skips
+  # this and gets the layout's normal placement.
+  hyprctl eval "
+    if omagiff_rule then omagiff_rule:set_enabled(false) end
+    omagiff_rule = hl.window_rule({ match = { class = 'TUI.giff' }, $1 })" >/dev/null 2>&1
+}
+
+if [[ $layout == scrolling ]]; then
+  apply_rule "tile = true"
+
+  # The scrolling layout has no window rule for column width — only the
+  # colresize layoutmsg, which acts on whatever column holds focus. So wait for
+  # the window to exist AND hold focus before sending it, otherwise a slow
+  # launch would widen whichever column the user was already on.
+  (
+    for _ in {1..60}; do
+      # Test the focused window's class directly rather than looking up an
+      # address: colresize acts on the focused column anyway, and matching by
+      # address picks the wrong one when a previous giff window is still open.
+      if [[ $(hyprctl activewindow -j 2>/dev/null | jq -r '.class // empty' 2>/dev/null) == "TUI.giff" ]]; then
+        hyprctl dispatch 'hl.dsp.layout("colresize 1.0")' >/dev/null 2>&1
+        break
+      fi
+      sleep 0.1
+    done
+  ) >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+else
+  # Window-rule sizes are pixels, not percentages, so 90% is computed against
+  # the focused monitor's LOGICAL size (physical / scale). Same approach
+  # omarchy-launch-about uses to presize itself, and recomputing it per launch
+  # keeps it right across monitors with different resolutions or scales.
+  size=""
+  if [[ -n $layout ]]; then
+    read -r width height <<<"$(
+      hyprctl monitors -j 2>/dev/null |
+        jq -r 'first(.[] | select(.focused)) | "\(.width / .scale | floor) \(.height / .scale | floor)"' 2>/dev/null
+    )"
+    [[ $width =~ ^[0-9]+$ && $height =~ ^[0-9]+$ ]] &&
+      size=", size = { $((width * 90 / 100)), $((height * 90 / 100)) }"
+  fi
+  apply_rule "float = true, center = true$size"
+fi
+
+# The detached terminal inherits this shell's stdout/stderr, so foot's startup
+# chatter ("compositor does not implement the xdg-toplevel-icon protocol") lands
+# in the prompt you launched from. Real problems are caught above, so the
+# terminal's own output is discarded rather than left to litter the shell.
+exec omarchy-launch-tui --app-id=TUI.giff omagiff-run --omagiff-window "$@" >/dev/null 2>&1

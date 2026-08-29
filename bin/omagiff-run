@@ -1,0 +1,86 @@
+#!/bin/bash
+# Run giff correctly on Omarchy. This is what the floating window runs, and it
+# also works inline in a normal terminal.
+
+HOLD=0
+if [[ ${1:-} == --omagiff-window ]]; then
+  HOLD=1
+  shift
+fi
+
+# Omarchy sets diff.mnemonicPrefix=true globally, which makes `git diff` emit
+# i/ and w/ path prefixes. giff's parser only matches a/ and b/, so without this
+# override it reports "No changes." in every repo. Scoped to giff's own git
+# calls via git's environment config, so normal `git diff` output is untouched.
+i="${GIT_CONFIG_COUNT:-0}"
+export GIT_CONFIG_KEY_$i=diff.mnemonicPrefix
+export GIT_CONFIG_VALUE_$i=false
+export GIT_CONFIG_COUNT=$((i + 1))
+
+# uwsm/xdg-terminal-exec inherits the systemd user PATH, which does not include
+# ~/.cargo/bin (that is only added for interactive shells in ~/.bashrc), so the
+# floating window would not find giff without this.
+command -v giff >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
+
+# Anything printed before giff takes over the screen would otherwise vanish with
+# the window the instant giff exits.
+bail() {
+  echo
+  echo "  $1"
+  [[ -n ${2:-} ]] && echo "  $2"
+  echo
+  if (( HOLD )); then
+    echo "  Press any key to close."
+    # Read from the controlling terminal rather than stdin: the launched window
+    # inherits an already-closed stdin, so a plain `read` sees EOF and returns
+    # instantly, which is exactly the flash this is here to prevent.
+    read -rsn1 </dev/tty 2>/dev/null || sleep 15
+  fi
+  exit 1
+}
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  bail "Not a git repository:" "$PWD"
+fi
+
+# With no revision given, giff runs a plain `git diff` — unstaged tracked
+# changes only. That reports "No changes." when everything is staged, which in
+# the floating window just looks like it failed to open. `giff HEAD` covers
+# staged and unstaged together, which is what "show me my changes" usually
+# means, and giff labels the panes HEAD → Working Tree either way.
+if (( $# == 0 )); then
+  if [[ -n $(git diff HEAD --no-color 2>/dev/null) ]]; then
+    set -- HEAD
+  else
+    untracked=$(git ls-files --others --exclude-standard | wc -l)
+    if (( untracked > 0 )); then
+      bail "No tracked changes to diff." \
+           "$untracked untracked file(s) — git diff never shows those. Add them first."
+    fi
+    bail "No changes since the last commit."
+  fi
+fi
+
+# Hyprland maps the window at the terminal's default size (80x24 for foot) and
+# only then applies the size rule. giff draws its first frame immediately and
+# then blocks in event::read(), so it would sit showing an 80-column layout in a
+# 127-column window until the next key or mouse event woke it. Waiting for the
+# grid to stop changing means the first frame is already the right size. Same
+# approach omarchy-launch-about uses before it measures itself.
+settle_grid() {
+  local current previous="" held=0
+  for _ in {1..40}; do
+    current=$(stty size 2>/dev/null) || return 0
+    if [[ $current == $previous ]]; then
+      (( ++held == 3 )) && return 0
+    else
+      held=0
+      previous=$current
+    fi
+    sleep 0.05
+  done
+}
+
+(( HOLD )) && settle_grid
+
+exec giff "$@"
