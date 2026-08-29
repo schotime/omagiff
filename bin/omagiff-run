@@ -3,10 +3,42 @@
 # also works inline in a normal terminal.
 
 HOLD=0
-if [[ ${1:-} == --omagiff-window ]]; then
-  HOLD=1
-  shift
-fi
+RETURN_TO=""
+while :; do
+  case "${1:-}" in
+    --omagiff-window) HOLD=1; shift ;;
+    --omagiff-return) RETURN_TO="${2:-}"; shift 2 ;;
+    *) break ;;
+  esac
+done
+
+# Making giff a full-width column scrolls the whole scrolling tape, pushing the
+# terminal that launched it off-screen. Hyprland then picks whichever column the
+# tape happens to leave in view, which is rarely the one you came from. Focusing
+# the launching window by address puts it back and scrolls the tape to it.
+# This Hyprland parses `hyprctl dispatch` arguments as Lua, so the legacy
+# `focuswindow address:...` form is a syntax error. Try the Lua API first and
+# fall back, the way omarchy-launch-about does for its own dispatches.
+#
+# The scrolling layout only scrolls to a newly focused window when at least
+# scrolling:follow_min_visible of it is already on screen (0.4 by default).
+# A full-width giff column pushes the launching terminal almost entirely out of
+# view, well under that, so focusing it would otherwise leave you typing into a
+# window you cannot see. Drop the threshold for this one dispatch and put it
+# straight back.
+return_focus() {
+  [[ -n $RETURN_TO ]] || return 0
+
+  local threshold=""
+  threshold=$(hyprctl getoption scrolling:follow_min_visible 2>/dev/null | awk '/^float:/ {print $2}')
+  if [[ $threshold =~ ^[0-9.]+$ ]]; then
+    trap 'hyprctl keyword scrolling:follow_min_visible "$threshold" >/dev/null 2>&1' RETURN
+    hyprctl keyword scrolling:follow_min_visible 0 >/dev/null 2>&1
+  fi
+
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$RETURN_TO\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$RETURN_TO" >/dev/null 2>&1 || true
+}
 
 # Omarchy sets diff.mnemonicPrefix=true globally, which makes `git diff` emit
 # i/ and w/ path prefixes. giff's parser only matches a/ and b/, so without this
@@ -36,6 +68,7 @@ bail() {
     # instantly, which is exactly the flash this is here to prevent.
     read -rsn1 </dev/tty 2>/dev/null || sleep 15
   fi
+  return_focus
   exit 1
 }
 
@@ -83,4 +116,8 @@ settle_grid() {
 
 (( HOLD )) && settle_grid
 
-exec giff "$@"
+# Not exec: giff has to return so focus can be handed back afterwards.
+giff "$@"
+status=$?
+return_focus
+exit $status

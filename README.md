@@ -77,6 +77,10 @@ Three things about giff on Omarchy that this works around:
   it would show an 80-column layout in a full-width window until the next
   keypress. `omagiff-run` waits for the terminal size to settle before starting
   giff.
+- In the `scrolling` layout, giving giff a full-width column scrolls the whole
+  tape, pushing the terminal you launched from off-screen; on exit Hyprland
+  focuses whichever column it left in view instead. `omagiff` records the
+  launching window and focuses it back by address when giff exits.
 - The default revision, as above.
 
 The first two are upstream bugs rather than configuration problems.

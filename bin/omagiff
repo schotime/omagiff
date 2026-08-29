@@ -86,4 +86,11 @@ fi
 # chatter ("compositor does not implement the xdg-toplevel-icon protocol") lands
 # in the prompt you launched from. Real problems are caught above, so the
 # terminal's own output is discarded rather than left to litter the shell.
+# Captured before launching, while the terminal you typed this in still holds
+# focus, so giff can hand focus back to it on exit.
+return_to=""
+command -v jq >/dev/null 2>&1 &&
+  return_to=$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' 2>/dev/null)
+[[ -n $return_to ]] && set -- --omagiff-return "$return_to" "$@"
+
 exec omarchy-launch-tui --app-id=TUI.giff omagiff-run --omagiff-window "$@" >/dev/null 2>&1
