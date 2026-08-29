@@ -36,6 +36,53 @@ else
   layout=$([[ $mode == tile ]] && echo scrolling || echo forced-float)
 fi
 
+# Captured before launching, while the terminal you typed this in still holds
+# focus, so it can be focused again once giff's window is gone.
+return_to=""
+command -v jq >/dev/null 2>&1 &&
+  return_to=$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' 2>/dev/null)
+
+# Refocusing has to happen after giff's window has actually disappeared. Doing
+# it from inside that window (as omagiff-run once did) means focusing the
+# launcher and then having Hyprland re-pick focus when the window closes a
+# moment later. Watching from out here avoids that race entirely.
+#
+# The scrolling layout only scrolls to a newly focused window when at least
+# scrolling:follow_min_visible of it is already on screen (0.4 by default), and
+# a full-width column pushes the launcher well under that, so the threshold is
+# dropped for this one dispatch and put straight back.
+watch_and_restore() {
+  local want_full="$1" address="" threshold=""
+
+  # Identify our window by waiting for a FOCUSED one, and take that address.
+  # Looking up "the first TUI.giff" instead picks a stale window from an earlier
+  # session, and then nothing below ever matches.
+  for _ in {1..80}; do
+    address=$(hyprctl activewindow -j 2>/dev/null |
+      jq -r 'select(.class == "TUI.giff") | .address // empty' 2>/dev/null)
+    [[ -n $address ]] && break
+    sleep 0.1
+  done
+  [[ -n $address ]] || return 0
+
+  # colresize acts on the focused column, which is ours as of the loop above.
+  # It is a scrolling-layout message; on dwindle it is simply rejected.
+  [[ $want_full == full ]] && hyprctl dispatch 'hl.dsp.layout("colresize 1.0")' >/dev/null 2>&1
+
+  [[ -n $return_to ]] || return 0
+
+  while hyprctl clients -j 2>/dev/null | jq -e --arg a "$address" 'any(.[]; .address == $a)' >/dev/null 2>&1; do
+    sleep 0.4
+  done
+
+  threshold=$(hyprctl getoption scrolling:follow_min_visible 2>/dev/null | awk '/^float:/ {print $2}')
+  [[ $threshold =~ ^[0-9.]+$ ]] && hyprctl keyword scrolling:follow_min_visible 0 >/dev/null 2>&1
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$return_to\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$return_to" >/dev/null 2>&1 || true
+  [[ $threshold =~ ^[0-9.]+$ ]] && hyprctl keyword scrolling:follow_min_visible "$threshold" >/dev/null 2>&1
+  return 0
+}
+
 apply_rule() {
   # Replacing the previous launch's rule keeps a float rule from outliving the
   # workspace it was made for. A Hyprland without the Lua eval API just skips
@@ -48,22 +95,7 @@ apply_rule() {
 if [[ $layout == scrolling ]]; then
   apply_rule "tile = true"
 
-  # The scrolling layout has no window rule for column width — only the
-  # colresize layoutmsg, which acts on whatever column holds focus. So wait for
-  # the window to exist AND hold focus before sending it, otherwise a slow
-  # launch would widen whichever column the user was already on.
-  (
-    for _ in {1..60}; do
-      # Test the focused window's class directly rather than looking up an
-      # address: colresize acts on the focused column anyway, and matching by
-      # address picks the wrong one when a previous giff window is still open.
-      if [[ $(hyprctl activewindow -j 2>/dev/null | jq -r '.class // empty' 2>/dev/null) == "TUI.giff" ]]; then
-        hyprctl dispatch 'hl.dsp.layout("colresize 1.0")' >/dev/null 2>&1
-        break
-      fi
-      sleep 0.1
-    done
-  ) >/dev/null 2>&1 &
+  watch_and_restore full >/dev/null 2>&1 &
   disown 2>/dev/null || true
 else
   # Window-rule sizes are pixels, not percentages, so 90% is computed against
@@ -80,17 +112,13 @@ else
       size=", size = { $((width * 90 / 100)), $((height * 90 / 100)) }"
   fi
   apply_rule "float = true, center = true$size"
+
+  watch_and_restore plain >/dev/null 2>&1 &
+  disown 2>/dev/null || true
 fi
 
 # The detached terminal inherits this shell's stdout/stderr, so foot's startup
 # chatter ("compositor does not implement the xdg-toplevel-icon protocol") lands
 # in the prompt you launched from. Real problems are caught above, so the
 # terminal's own output is discarded rather than left to litter the shell.
-# Captured before launching, while the terminal you typed this in still holds
-# focus, so giff can hand focus back to it on exit.
-return_to=""
-command -v jq >/dev/null 2>&1 &&
-  return_to=$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty' 2>/dev/null)
-[[ -n $return_to ]] && set -- --omagiff-return "$return_to" "$@"
-
 exec omarchy-launch-tui --app-id=TUI.giff omagiff-run --omagiff-window "$@" >/dev/null 2>&1
